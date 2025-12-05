@@ -247,25 +247,9 @@ struct NetlinkReplyInner {
 
 impl NetlinkReplyInner {
     #[cfg_attr(not(feature = "async"), maybe_async::maybe_async)]
-    async fn read_buf(sock: &mut Socket, buf: &mut [u8]) -> io::Result<usize> {
+    async fn try_read_buf(sock: &mut Socket, buf: &mut [u8]) -> io::Result<usize> {
         loop {
-            #[cfg(not(feature = "tokio"))]
-            let res = sock.read(&mut buf[..]).await;
-
-            #[cfg(feature = "tokio")]
-            let res = {
-                // Some subsystems don't correctly implement io notifications, which tokio
-                // runtime expects to receive before doing any actual io, hence we instead
-                // always attempt an io operation first.
-                let res = sock.try_read(&mut buf[..]);
-                if matches!(&res, Err(err) if err.kind() == ErrorKind::WouldBlock) {
-                    sock.readable().await?;
-                    continue;
-                }
-                res
-            };
-
-            match res {
+            match sock.try_read(&mut buf[..]) {
                 Ok(read) => return Ok(read),
                 Err(err) if err.kind() == ErrorKind::Interrupted => continue,
                 Err(err) => return Err(err),
@@ -275,13 +259,13 @@ impl NetlinkReplyInner {
 
     #[allow(clippy::type_complexity)]
     #[cfg_attr(not(feature = "async"), maybe_async::maybe_async)]
-    pub async fn recv(
+    pub async fn try_recv(
         &mut self,
         sock: &mut Socket,
         buf: &mut [u8; RECV_BUF_SIZE],
     ) -> io::Result<(u32, Result<(usize, usize), ReplyError>)> {
         if self.buf_offset == self.buf_read {
-            self.buf_read = Self::read_buf(sock, &mut buf[..]).await?;
+            self.buf_read = Self::try_read_buf(sock, &mut buf[..]).await?;
             self.buf_offset = 0;
         }
 
@@ -387,7 +371,11 @@ impl<Request: NetlinkRequest> NetlinkReply<'_, Request> {
         let buf = Arc::make_mut(self.buf);
 
         loop {
-            match self.inner.recv(self.sock, buf).await {
+            match self.inner.try_recv(self.sock, buf).await {
+                Err(io_err) if io_err.kind() == ErrorKind::WouldBlock => {
+                    self.done = true;
+                    return None
+                },
                 Err(io_err) => {
                     self.done = true;
                     return Some(Err(io_err.into()));

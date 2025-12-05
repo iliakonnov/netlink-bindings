@@ -4,7 +4,7 @@ use std::{
     marker::{Send, Sync},
     sync::Arc,
 };
-
+use std::io::ErrorKind;
 use netlink_bindings::traits::NetlinkChained;
 
 use crate::{NetlinkReplyInner, NetlinkSocket, ReplyError, Socket, RECV_BUF_SIZE};
@@ -68,7 +68,11 @@ impl NetlinkReplyChained<'_> {
         let buf = Arc::make_mut(self.buf);
 
         loop {
-            match self.inner.recv(self.sock, buf).await {
+            match self.inner.try_recv(self.sock, buf).await {
+                Err(io_err) if io_err.kind() == ErrorKind::WouldBlock => {
+                    self.done.set_all();
+                    return None
+                },
                 Err(io_err) => {
                     self.done.set_all();
                     return Some(Err(io_err.into()));
